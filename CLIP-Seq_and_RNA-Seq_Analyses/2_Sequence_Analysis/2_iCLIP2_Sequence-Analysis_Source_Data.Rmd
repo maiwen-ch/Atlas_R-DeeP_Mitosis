@@ -1,0 +1,395 @@
+---
+title: "Sequence_Analysis_KIFC1_iCLIP"
+author: "Simona Cantarella, Maïwen Caudron-Herger"
+date: "2024-05-06"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set Working Directory
+
+```{r setwd}
+# Set R version -> 4.3.0
+setwd('~/Maiwen/postprocessing/REPORT/')
+```
+
+# Libraries
+
+```{r, message=FALSE, warning=F,comment=F}
+# BiocManager::install("BiocStyle")
+library(BiocStyle)
+library(rtracklayer)
+library(ggplot2)
+library(BindingSiteFinder) # Install directly from GitHub: install.packages("remotes") and then remotes::install_github("ZarnackGroup/BindingSiteFinder")
+library(png)
+library(ComplexHeatmap)
+library(dplyr)
+library(ggpubr)
+library(gridExtra)
+library(GenomicFeatures)
+library(forcats)
+library(paletteer)
+library(tidyr)
+library(GGally)
+#
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(plyranges)
+library(ggpubr)
+library(ggseqlogo)
+library(msa)
+library(ggpointdensity)
+library(pqsfinder)
+library(RColorBrewer)
+library(cliProfiler)
+library(cowplot)
+library(viridis)
+library(circlize)
+library(knitr)
+library(matrixStats)
+library(Gviz)
+library(ggrepel)
+```
+
+# 1 - Load data
+
+## Import the crosslink sites
+```{r}
+peak.file="/omics/odcf/analysis/OE0284_projects/clipseq/users/varshni/PureCLIP/unique/PureCLIP.crosslink_sites.bed"
+cs = import(con = peak.file, format = "BED",extraCols=c("additionalScores" = "character"))
+cs$additionalScores = NULL
+cs = keepStandardChromosomes(cs,pruning.mode = "coarse")
+cs
+```
+
+## Import the iCLIP coverage in the form of .bigwig files
+```{r}
+mypath <- "/omics/odcf/analysis/OE0284_projects/clipseq/users/varshni/crosslink_nt/unique"
+clipFilesP <- list.files(mypath, pattern = "*plus.bw$",full.names = T)
+clipFilesP <- clipFilesP[-grep("merge",clipFilesP)]
+clipFilesM <- list.files(mypath, pattern = "*minus.bw$",full.names = T)
+clipFilesM <- clipFilesM[-grep("merge",clipFilesM)]
+
+meta = data.frame(
+  id = c(1:4),
+  condition = factor(rep("WT", 4)), 
+  clPlus = clipFilesP, clMinus = clipFilesM)
+meta
+```
+
+## Construct the BSFDataSet object
+```{r}
+bds = BSFDataSetFromBigWig(ranges = cs, meta = meta, silent = TRUE)
+bds
+```
+
+## Construct an annotation comprehensive of repeated elements
+
+```{r, eval=T}
+# import the Genecode annotation version43
+annoFile = "/omics/odcf/analysis/OE0284_projects/clipseq/users/varshni/postprocessing/unique/BindingSiteFinder/gencode.v43.annotation.gff3"
+annoInfo = import(annoFile, format = "gff3")
+annoInfo = annoInfo[-grep("PAR",annoInfo$ID),] # remove PAR regions 
+
+# import repeats annotation
+repeats <- read.csv("/omics/odcf/analysis/OE0284_projects/clipseq/users/varshni/prova_rmsk/RepeatMask.csv",sep=",")
+
+# convert the csv file into a GRanges object
+repeats <- GRanges(
+    seqnames = Rle(repeats$genoName),
+    ranges = IRanges(repeats$genoStart, end = repeats$genoEnd),
+    strand = Rle(strand(repeats$strand)),
+    source = "rmsk",
+    type = "gene",
+    ID = repeats$repName,
+    gene_id = repeats$repName,
+    gene_type = repeats$repClass,
+    gene_name = repeats$repFamily)
+
+# check duplicated gene types in the Genecode annotation and repeats annotation, and keep the annotation with the highest number of genes
+intersect(unique(annoInfo$gene_type),unique(repeats$gene_type))
+
+#length(grep("snRNA",annoInfo$gene_type)) 
+#length(grep("snRNA",repeats$gene_type))
+repeats <- repeats[!grepl("snRNA",repeats$gene_type),]  # remove snRNA from the repeats annotation
+
+#length(grep("rRNA",annoInfo$gene_type))
+#length(grep("rRNA",repeats$gene_type))
+annoInfo <- annoInfo[!grepl("rRNA",annoInfo$gene_type),] # remove rRNA from the gencode annotation
+
+#length(grep("scRNA",annoInfo$gene_type))
+#length(grep("scRNA",repeats$gene_type))
+annoInfo <- annoInfo[!grepl("scRNA",annoInfo$gene_type),] # remove scRNA from the gencode annotation
+
+# create the final annotation
+gencode.v43.repeats <- c(annoInfo,repeats)
+
+# export the final annotation
+export(gencode.v43.repeats,"./gencode.v43.repeats.gff3",format = "GFF3")
+```
+
+# 2 - Create annotation
+
+## Create annotation for genes
+```{r}
+# Load the genecode annotation comprehensive of repeated elements
+annoFile = "/omics/odcf/analysis/OE0284_projects/clipseq/users/Maiwen/postprocessing/REPORT/gencode.v43.repeats.gff3"
+annoDb = makeTxDbFromGFF(file = annoFile, format = "gff3")
+annoInfo = import(annoFile, format = "gff3")
+
+# Get genes as GRanges
+gns = annoInfo[annoInfo$type=="gene",]
+```
+
+## Create annotation for transcript regions
+
+```{r}
+cdseq = cds(annoDb) 
+intrns = unlist(intronsByTranscript(annoDb)) 
+utrs3 = unlist(threeUTRsByTranscript(annoDb)) 
+utrs5 = unlist(fiveUTRsByTranscript(annoDb)) 
+repeats = granges(annoInfo[annoInfo$source=="rmsk"])
+regions = GRangesList(CDS = cdseq, Intron = intrns, UTR3 = utrs3, UTR5 = utrs5, REPEATS=repeats)
+regions
+```
+
+# 3 - Define binding sites
+
+## Manually test different binding site sizes
+```{r, eval=T}
+# compute binding sites
+bds1 <- makeBindingSites(object = bds, bsSize = 5)
+bds2 <- makeBindingSites(object = bds, bsSize = 7)
+bds3 <- makeBindingSites(object = bds, bsSize = 9)
+bds4 <- makeBindingSites(object = bds, bsSize = 11)
+
+# summarize in list
+l = list(`1. bsSize = 5` = bds1, `2. bsSize = 7` = bds2, 
+         `3. bsSize = 9` = bds3, `4. bsSize = 11` = bds4)
+rangeCoveragePlot(l, width = 20, show.samples = TRUE) 
+```
+Suggested: 7 nt (a bit more toward background level, without reaching it).
+We can also run the function BSFind and check the suggested parameters
+
+## Make binding sites (use bsResolution=fine)
+```{r, echo=FALSE}
+bdsOut <- BSFind(object = bds, anno.genes = gns, anno.transcriptRegionList = regions, veryQuiet = TRUE, est.maxBsWidth = 21, est.bsResolution = "fine")
+```
+
+### Check results of the function with a graphical representation
+```{r}
+processingStepsFlowChart(bdsOut)
+```
+### Estimate width manually
+```{r}
+estimateBsWidthPlot(estimateBsWidth(object = bds, anno.genes = gns, anno.transcriptRegionList = regions))
+```
+I would suggest to use a gene-wise (GW) filter of 50%, using a binding size of 7 nt.
+
+
+## Make binding sites (use bsResolution=fine)
+```{r}
+# Use 7 nt bsSize and 50% geneWise filter
+bdsOut_7nt_GW = BSFind(object = bds, anno.genes = gns, anno.transcriptRegionList = regions, veryQuiet = TRUE, est.maxBsWidth = 29, bsSize = 7, cutoff.geneWiseFilter = 0.5, est.bsResolution = "fine")
+
+processingStepsFlowChart(bdsOut_7nt_GW)
+```
+# 4 - Summary plots
+
+## PureCLIP filter 1%
+```{r}
+pureClipGlobalFilterPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Plots duplicated sites
+```{r}
+duplicatedSitesPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Merge crosslink sites into binding sites
+```{r}
+mergeCrosslinkDiagnosticsPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Number of binding sites after the various selection steps
+```{r}
+makeBsSummaryPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Replicates reproducibility
+```{r}
+reproducibilityFilterPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+```{r}
+reproducibilitySamplesPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+29468 binding sites in common out of 36934. It is 79.8% of the selected binding sites.
+36934 is the number of binding sites which are in common for at least 3 replicates (= 3 or 4).
+
+```{r, message=FALSE}
+reproducibilityScatterPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+Pairwise Pearson's correlation are good. All > 0.78.
+
+# 5 -Genomic target identification
+
+## Target gene identification
+```{r}
+targetGeneSpectrumPlot(bdsOut_7nt_GW, showNGroups = nrow(bdsOut_7nt_GW@plotData$assignToGenes$dataSpectrum)) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Transcript region identification
+```{r}
+transcriptRegionOverlapsPlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+## Transcript region spectrum, normalized to summed length
+```{r}
+transcriptRegionSpectrumPlot(bdsOut_7nt_GW,normalize = T, values = "percentage") + ggtitle("bdsOut_7nt_GW")
+```
+
+## Binding site definedness
+How well the defined binding sites fit to the observed crosslink coverage can be assess through binding site definedness. This also gives first insights into the overall binding site shape and the binding mode of the RBP. Here we assess this property through a percent bound score, that divides the number of crosslinks inside the binding sites by the total number of crosslinks in a region around the binding site. As default, this background region is two times the size of the binding site. In other words, we compare the signal within a binding site to a same sized window directly flanking the binding site on both sides.
+```{r}
+bindingSiteDefinednessPlot(bdsOut_7nt_GW, by = "transcript") + ggtitle("bdsOut_7nt_GW")
+```
+
+```{r}
+bindingSiteDefinednessPlot(bdsOut_7nt_GW, showN.genes=nrow(bdsOut_7nt_GW@plotData$assignToGenes$dataSpectrum), by = "gene_type") + ggtitle("bdsOut_7nt_GW")
+```
+
+
+# 6 - Binding site strength - filter the tails
+```{r}
+globalScorePlot(bdsOut_7nt_GW) + ggtitle("bdsOut_7nt_GW")
+```
+
+
+# 7 - Get Ranges
+```{r}
+bs_7nt_GW <- getRanges(bdsOut_7nt_GW)
+bs_7nt_GW[order(bs_7nt_GW$score,decreasing = T),]
+```
+
+## Filter out bottom and top 5%
+
+```{r}
+#Filter out lower and higher 5%
+quants = quantile(bs_7nt_GW$score, probs = seq(0,1, by = 0.05))
+ggplot(data = data.frame(score = bs_7nt_GW$score), aes(x = log2(score))) +
+    geom_histogram(binwidth = 0.05) +
+    geom_vline(xintercept = c(log2(quants[2]),log2(quants[20]))) +
+    theme_classic() +
+    xlab("log2 Max PureCLIP score") +
+    ylab("Count")+
+   ggtitle("bs_7nt_GW")
+bs_7nt_GW = bs_7nt_GW[bs_7nt_GW$score >= quants[2]&bs_7nt_GW$score <= quants[20]]
+```
+
+
+# 8 - Add CLIP coverage
+```{r}
+bs_7nt_GW = clipCoverage(bdsOut_7nt_GW, ranges.merge = TRUE, samples.merge = FALSE, positions.merge = FALSE)
+bs_7nt_GW # 36934 ranges
+# Store separately the TOP 5% BS
+bs_7nt_GW_TOP5 <- bs_7nt_GW[bs_7nt_GW$score >= quants[20]]
+bs_7nt_GW_TOP5
+# Remove top and bottom 5%
+#bs_7nt_GW = bs_7nt_GW[bs_7nt_GW$score >= quants[2]&bs_7nt_GW$score <= quants[20]]
+#bs_7nt_GW # 33240 ranges
+```
+
+# Export the results
+```{r, eval=T}
+# As rds
+saveRDS(bs_7nt_GW,file="bs_7nt_GW.rds")
+saveRDS(bdsOut_7nt_GW,file="bdsOut_7nt_GW.rds")
+
+# As bed
+export(bs_7nt_GW,"bs_7nt_GW.bed",format="BED")
+
+# Free environment
+rm(list=ls())
+```
+
+
+# 9 - Load data for binding site sequence analysis
+```{r}
+# BS already filtered for top and bottom 5% (removed)
+bs_7nt_GW <- readRDS("bs_7nt_GW.rds")
+```
+
+# Assign strongest (top 20%) and weakest (bottom 20%) binding sites
+```{r}
+quants = quantile(bs_7nt_GW$score, probs = seq(0,1, by = 0.05))
+bs_7nt_GW <- bs_7nt_GW %>% mutate(bsStrength=case_when(
+  bs_7nt_GW$score >= quants[17] ~ "top", 
+  bs_7nt_GW$score <= quants[5] ~ "bot",
+  TRUE ~ "mid"))
+```
+
+# Assign bs sequence
+```{r}
+bs_7nt_GW <- bs_7nt_GW %>% mutate(bsSeq=getSeq(Hsapiens,bs_7nt_GW))
+```
+
+# 10 - Compare the single nucleotides content in the strongest and weakest binding sites - pentamer frequency
+
+```{r, warning=FALSE}
+n=5
+
+seq_top <- bs_7nt_GW %>% filter(bsStrength=="top") %>% .$bsSeq
+seq_bot <- bs_7nt_GW %>% filter(bsStrength=="bot") %>% .$bsSeq
+
+kmer_top <- data.frame("freq"=colSums(oligonucleotideFrequency(seq_top,width = n))/sum(oligonucleotideFrequency(seq_top,width = n)))
+kmer_bot <- data.frame("freq"=colSums(oligonucleotideFrequency(seq_bot,width = n))/sum(oligonucleotideFrequency(seq_bot,width = n)))
+df <- data.frame("top"=kmer_top,"bot"=kmer_bot)
+df <- merge(kmer_top,kmer_bot,by="row.names",all=T)
+colnames(df) <- c("names","freq_top","freq_bot")
+
+ggplot(df, aes(x = log10(freq_bot), y=log10(freq_top),label=names))+
+  geom_point(size = 3)+
+  geom_text_repel()+
+  geom_pointdensity(size = 2)+
+  #geom_smooth(method = "lm", color = "black")+
+  geom_abline(intercept = 0,slope = 1)+
+  ggtitle("Pentamer frequency")+
+  stat_cor()
+```
+
+```{r, warning=FALSE}
+#GGG <- df[grep("GGG",df$names),]
+TTTT <- df[grep("TTTT",df$names),]
+ATTT <- df[grep("ATTT",df$names),]
+
+df %>%
+  ggplot(aes(x=(freq_bot),y=(freq_top))) +
+  geom_point(size = 3)+
+  geom_pointdensity(size = 2)+
+  #geom_smooth(method = "lm", color = "black")+
+  geom_abline(intercept = 0,slope = 1)+
+  #stat_cor()+
+  
+    geom_point(data=ATTT, 
+             aes(x=(freq_bot),y=(freq_top)), 
+             color='chocolate',size=3)+
+    geom_point(data=TTTT, 
+             aes(x=(freq_bot),y=(freq_top)), 
+             color='red4',size=3)+
+  geom_label_repel(data=TTTT,aes((freq_bot),y=(freq_top),label=names),box.padding=1,max.overlaps = 70)+
+  #geom_label_repel(data=ATTT,aes((freq_bot),y=(freq_top),label=names),box.padding=0.5,max.overlaps = 70)+
+  #geom_label_repel(data=TCTT,aes((freq_bot),y=(freq_top),label=names),box.padding=0.5,max.overlaps = 70)+  
+  ylab("20% strongest binding sites")+xlab("20% weakest binding sites")+
+  xlim(0, 0.04) +
+  ylim(0, 0.04) +
+  ggtitle("T-rich Pentamer frequency")+
+  theme_bw()+
+  theme(aspect.ratio=1,axis.text=element_text(size=18),axis.title=element_text(size=20),title=element_text(size=15),plot.title = element_text(hjust = 0.5))
+```
+

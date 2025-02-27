@@ -1,0 +1,200 @@
+---
+title: "basic_reads_processing"
+author: "Varshni Rajagopal, Maiwen Caudron-Herger"
+date: "2024-05-06"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. set_working_directory
+
+```{r setwd}
+setwd("~/Maiwen/")
+```
+
+```{r libraries}
+library(ggplot2)
+library(reshape2)
+```
+
+# 2. Barcode frequencies
+
+```{r}
+exp_barcodes <- read.table("~/Varshni/bcFreq_demulti_trimming/bc_freq/exp_barcodes.detected")
+colnames(exp_barcodes) <- c("count", "kmer")
+exp_barcodes$kmer <- factor(exp_barcodes$kmer,levels = exp_barcodes$kmer)
+ggplot(data=exp_barcodes[1:8,], aes(x = kmer, y= count/1000000))+ geom_bar(stat = "identity")+
+  ylab(bquote('read count per k-mer' (10^6)))+xlab("k-mer")+
+  ggtitle("8 most frequently detected experimental barcodes")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 3. rRNA
+
+```{r rRNA proportion}
+rRNA_proportion <- data.frame("rRNA"= c("mt-rRNA_12S","mt-rRNA_16S","rRNA_18S","rRNA_28S","rRNA_5S","rRNA_5.8S"), 
+                              "read_count"=c(30357, 1041294, 31253028, 115401620, 3522286, 2745521))
+ggplot(data=rRNA_proportion,aes(x=rRNA,y=read_count/1000000))+geom_bar(stat="identity")+
+  ylab(bquote('reads aligned to rRNA '(10^6)))+xlab("rRNA")+
+  ggtitle("rRNA read counts in fastq file (merge of 4 replicates)")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+rRNA_proportion_sample <- data.frame("sample"=c("KIFC1_1","KIFC1_2","KIFC1_3","KIFC1_4","tot"),"tot_reads_before_rRNA_removal"=c(90392802,85803928,87798740,89806619,353802089),"tot_reads_after_rRNA_removal"=c(51641021,51085426,48470365,48611659,199808471))
+rRNA_proportion_sample$rRNA_reads <- rRNA_proportion_sample$tot_reads_before_rRNA_removal-rRNA_proportion_sample$tot_reads_after_rRNA_removal
+rRNA_proportion_sample_df <- rRNA_proportion_sample[,c(1,3,4)]
+rRNA_proportion_sample_df <- melt(rRNA_proportion_sample_df, id.vars = "sample")
+
+ggplot(data=rRNA_proportion_sample_df,aes(x=sample,y=value/1000000,fill=variable))+geom_bar(position="stack", stat="identity")+
+  ylab(bquote('read count '(10^6)))+
+  ggtitle("rRNA reads in each sample")+
+  scale_fill_manual(values=c('grey78','grey30'),labels=c('non-rRNA','rRNA'))+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+rRNA_proportion_sample_freq <- rRNA_proportion_sample
+rRNA_proportion_sample_freq$sum <- rRNA_proportion_sample_freq$tot_reads_after_rRNA_removal+rRNA_proportion_sample_freq$rRNA_reads
+rRNA_proportion_sample_freq$freq_tot_reads_after_rRNA_removal <- rRNA_proportion_sample_freq$tot_reads_after_rRNA_removal/rRNA_proportion_sample_freq$sum
+rRNA_proportion_sample_freq$freq_rRNA_reads <- rRNA_proportion_sample_freq$rRNA_reads/rRNA_proportion_sample_freq$sum
+
+rRNA_proportion_sample_freq_df <- rRNA_proportion_sample_freq[,c(1,6,7)]
+rRNA_proportion_sample_freq_df <- melt(rRNA_proportion_sample_freq_df,id.vars = "sample")
+ggplot(data=rRNA_proportion_sample_freq_df[-c(5,10),],aes(x=sample,y=value,fill=variable))+geom_bar(position="stack", stat="identity")+
+  ylab("read frequency")+
+  ggtitle("rRNA reads removed from each sample")+
+  scale_fill_manual(values=c('grey78','grey30'),labels=c( 'non-rRNA','rRNA'))+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 4. Genomic mapping
+
+```{r genomic_mapping}
+mapping <- data.frame("reads"=c("unique","multimapping","too_many_loci","too_many_mismatches","too_short"),
+                      "samples"= c(rep("KIFC1_1",5), rep("KIFC1_2",5), rep("KIFC1_3",5),rep("KIFC1_4",5
+                                                                                            )),"freq" =c(34.54,29.49,0.16,9.46,25.60,38.59,28.92,0.18,9.34,22.19,32.95,33.76,0.18,8.17,23.95,32.27,35.56,0.18,8.08,22.95)) 
+ggplot(data=mapping,aes(x=samples,y=freq,fill=reads))+geom_bar(position="stack", stat="identity")+
+   ylab("read frequency")+
+  ggtitle("Genomic mapping")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 5. Uniquely and multimapping reads
+
+```{r uniquely_mapping}
+mypath <- "~/Varshni/alignment/subset_unique_multi"
+RL_unique <- list.files(mypath, pattern = "*unique.readlengths$",full.names = T)
+KIFC1_1_unique = read.table(RL_unique[1])
+KIFC1_2_unique = read.table(RL_unique[2])
+KIFC1_3_unique = read.table(RL_unique[3])
+KIFC1_4_unique = read.table(RL_unique[4])
+
+unique <- list(KIFC1_1_unique,KIFC1_2_unique,KIFC1_3_unique,KIFC1_4_unique)
+names(unique) <- c("KIFC1_1","KIFC1_2","KIFC1_3","KIFC1_4")
+unique <- lapply(unique, function(x){
+  colnames(x) <- c("width","count")
+  x
+  })
+
+lapply(seq_along(unique), function(i) {
+  ggplot(unique[[i]], aes(x=width, y=count/1000000)) + 
+    geom_bar(stat = "identity",width=1)+ 
+    ylim(0,0.5)+
+    ylab((bquote('read count '(10^6))))+
+    ggtitle(names(unique)[i]) 
+  })
+
+```
+
+```{r multimappping_reads}
+RL_multimapping <- list.files(mypath, pattern = "*multimapping.readlengths$",full.names = T)
+KIFC1_1_multimapping = read.table(RL_multimapping[1])
+KIFC1_2_multimapping = read.table(RL_multimapping[2])
+KIFC1_3_multimapping = read.table(RL_multimapping[3])
+KIFC1_4_multimapping = read.table(RL_multimapping[4])
+
+multi <- list(KIFC1_1_multimapping,KIFC1_2_multimapping,KIFC1_3_multimapping,KIFC1_4_multimapping)
+names(multi) <- c("KIFC1_1","KIFC1_2","KIFC1_3","KIFC1_4")
+multi <- lapply(multi, function(x){
+  colnames(x) <- c("width","count")
+  x
+  })
+
+lapply(seq_along(multi), function(i) {
+  ggplot(multi[[i]], aes(x=width, y=count/1000000)) + 
+    geom_bar(stat = "identity",width=1)+ 
+    ylim(0,1.5)+
+    ylab((bquote('read count '(10^6))))+
+    ggtitle(names(multi)[i]) 
+  })
+```
+
+# 6. Duplicate removal
+
+```{r durplicate_removal}
+duplicates <- data.frame("reads"=c("processed","mapped","uniquely mapped","deduplicated"),
+                      "sample"=c(rep("KIFC1_1",4),rep("KIFC1_2",4),rep("KIFC1_3",4),rep("KIFC1_4",4)),
+                      "counts"=c(51641021,33066702,17837391,14529826,51085426,34491400,19715894,17691520,48470365,32337217,15972636,11735887,48611659,32974391,15686493,12441753))
+duplicates$reads <- factor(duplicates$reads,levels=unique(duplicates$reads))
+
+ggplot(data=duplicates,aes(x=sample,y=counts/1000000,fill=reads))+geom_bar(position="dodge",stat="identity")+
+  ylab(bquote('read count '(10^6)))+
+  ggtitle("Duplicate removal unique reads")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+duplicates <- data.frame("reads"=c("multimapped","genomic positions","deduplicated genomic positions"),
+                      "sample"=c(rep("KIFC1_1",3),rep("KIFC1_2",3),rep("KIFC1_3",3),rep("KIFC1_4",3)),
+                      "counts"=c(15229311,103311681,60256009,14775506,100183964,66797935,16364581,114068149,58498433,17287898,120987270,59333741))
+duplicates$reads <- factor(duplicates$reads,levels=unique(duplicates$reads))
+
+ggplot(data=duplicates,aes(x=sample,y=counts/1000000,fill=reads))+geom_bar(position="dodge",stat="identity")+
+  ylab(bquote('read count '(10^6)))+
+  ggtitle("Duplicate removal multimapping reads")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# 7. Conversion into crosslink events
+
+```{r unique reads}
+df <- data.frame("type"=c("crosslink events","crosslinked nts","stacked crosslink events","stacked crosslink nts"),
+                 "sample"=c(rep("KIFC1_1",4),rep("KIFC1_2",4),rep("KIFC1_3",4),rep("KIFC1_4",4)),
+                 "value"=c(14529826, 9078510, 7031503, 1580187, 17691520, 11192158, 8456690, 1957328, 11735887, 7522603, 5246217, 1032933, 12441753, 8128317, 5244999, 931563))
+
+ggplot(data=df,aes(x=sample,y=value/1000000,fill=type))+geom_bar(position="dodge",stat="identity")+
+  ylab(bquote('counts '(10^6)))+
+  ggtitle("Crosslink diagnostic plot - unique reads")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r multimapping reads}
+df <- data.frame("type"=c("crosslink events","crosslinked nts","stacked crosslink events","stacked crosslink nts"),
+                 "sample"=c(rep("KIFC1_1",4),rep("KIFC1_2",4),rep("KIFC1_3",4),rep("KIFC1_4",4)),
+                 "value"=c(60256009,7984860,53393776,1122627,66797935,9297663,58789217,1288945,58498433,7735035,51735522,972124,59333741,8020129,52249881,936269))
+
+ggplot(data=df,aes(x=sample,y=value/1000000,fill=type))+geom_bar(position="dodge",stat="identity")+
+  ylab(bquote('counts '(10^6)))+
+  ggtitle("Crosslink diagnostic plot - multimapping reads")+
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+save.image("basic_reads_processing.RData")
+```

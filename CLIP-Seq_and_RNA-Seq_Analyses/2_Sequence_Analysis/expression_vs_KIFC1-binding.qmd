@@ -1,0 +1,256 @@
+---
+title: "Combining expression and binding sites"
+author: "Melina Klostermann"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    code-fold: true
+    code-overflow: scroll
+    code-summary: "Show code"
+    code-tools: true
+    code-line-numbers: true
+    
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-expand: false
+    number-sections: true
+    
+    theme: sandstone
+    fontsize: 11pt
+    linestretch: 1.5
+        
+    cap-location: margin
+    crossref:
+      fig-title: Fig
+    
+    embed-resources: true
+    link-external-newwindow: true
+    smooth-scroll: true
+    
+    execute:
+      echo: true
+      warning: false
+      cache: false
+
+---
+
+
+```{r}
+# libraries
+library(tidyverse)
+library(edgeR)
+library(ggpubr)
+library(rtracklayer)
+library(GenomicRanges)
+
+theme_set(theme_bw())
+
+out <- "/Users/melinaklostermann/Documents/projects/KIFC1-Maiwen/Rajagopal_et_al_2025/01_expression_vs_KIFC1-binding/"
+```
+
+I make this analysis to respond to the following reviewer comment (Reviewer 1, point 5.b.1):
+
+"In the analysis of the CLIP data the authors argue that there is no sequence specificity for RNA binding to Kif1C. However, the authors have presented a relatively cursory analysis and should include additional data. For example, it would be useful to present the number of reads mapped to each gene in the CLIP sample compared to the abundance of each transcript in a total extract. This would help determine if Kif1C is only binding to the most abundant transcripts in the cell or to a specific subset of transcripts."
+
+Text from the manuscript:
+
+The analysis of the pentamer frequency at the binding sites did not reveal a particular sequence specificity for the strong binding sites, which were defined according to the PureCLIP scoring system (65). The most enriched pentamers contained U-stretches, most likely reflecting the uridine bias of UV crosslinking (66), and were rather localized in the lower 20% binding sites (Figure 5D). In summary, RNA sequences binding to KIFC1 were predominantly originating from rRNA and protein-coding genes, and apparently lacking sequence specificity.
+
+In the analysis here I compare the expression of the RNAs to the binding strength of the CLIP binding sites.
+
+# Input
+
+- KIFC1 binding sites - Supplementary Table 4 of manuscript 
+- counts on full transcripts from 3 RNAseq samples
+
+```{r}
+#--------------
+# Input
+#--------------
+
+# RNAseq counts
+counts <- read.table("/Users/melinaklostermann/Documents/projects/KIFC1-Maiwen/raw/KIFC1_counts",
+           header = T)
+
+counts <- dplyr::rename(counts, c(s1="X.home.mklostermann.projects.09_KIFC1.Maiwen.01_alignment.AS.1386817.LR.78342Aligned.sortedByCoord.out.bam",
+                   s2 = "X.home.mklostermann.projects.09_KIFC1.Maiwen.01_alignment.AS.1386818.LR.78342Aligned.sortedByCoord.out.bam",
+                   s3 = "X.home.mklostermann.projects.09_KIFC1.Maiwen.01_alignment.AS.1386819.LR.78342Aligned.sortedByCoord.out.bam"))
+
+counts_matrix <- as.matrix(counts %>% select(c(s1,s2,s3)))
+rownames(counts_matrix) <- substr(counts$Geneid,1,15)
+
+# KIFC1 binding sites
+bs <- read.csv(file = "/Users/melinaklostermann/Documents/projects/KIFC1-Maiwen/raw/KIFC1_binding_sites.csv")
+bs$geneID <- substr(bs$geneID,1,15)
+
+
+# KIFC1 CLIP signal
+
+clip_plus <- rtracklayer::import.bw("/Users/melinaklostermann/Documents/projects/KIFC1-Maiwen/raw/merged.plus.bw") %>% keepStandardChromosomes(pruning.mode = "coarse")
+strand(clip_plus) <- "+"
+
+clip_minus <- rtracklayer::import.bw("/Users/melinaklostermann/Documents/projects/KIFC1-Maiwen/raw/merged.minus.bw") %>% keepStandardChromosomes(pruning.mode = "coarse")
+strand(clip_minus) <- "-"
+
+clip_signal <- c(clip_plus, clip_minus)
+
+# Annotation
+anno <- rtracklayer::import.gff3("/Users/melinaklostermann/Documents/projects/anno/Gencodev43/gencode.v43.primary_assembly.annotation.gff3.gz")
+
+anno$gene_id <- substr(anno$gene_id,1,15)
+
+
+```
+
+
+```{r}
+#---------------
+# Calculate RPKM
+#---------------
+
+counts_matrix_filt <- counts_matrix[filterByExpr(counts_matrix),]
+counts_matrix_norm <- counts_matrix*calcNormFactors(counts_matrix)
+
+
+rownames(counts) <- counts$Geneid
+l <- counts[rownames(counts_matrix),]$Length
+rpkms <- rpkmByGroup(counts_matrix_norm, gene.length = l)
+
+rpkms <- as.data.frame(rpkms) 
+rpkms$geneID <- rownames(rpkms)
+
+```
+# Calculate RPKMs
+
+Here I use TMM normlisation (from edgeR) and then calculate the average RPKMs per transcript.
+
+```{r}
+#---------------
+# Calculate RPKM
+#---------------
+
+counts_matrix_filt <- counts_matrix[filterByExpr(counts_matrix),]
+counts_matrix_norm <- counts_matrix*calcNormFactors(counts_matrix)
+
+
+rownames(counts) <- counts$Geneid
+l <- counts[rownames(counts_matrix),]$Length
+rpkms <- rpkmByGroup(counts_matrix_norm, gene.length = l)
+
+rpkms <- as.data.frame(rpkms) 
+rpkms$geneID <- rownames(rpkms)
+
+```
+
+# Plot binding site strength vs transcript expression
+
+## Using Pureclip scores
+
+```{r}
+#---------------
+# Combine with binding sites and plot
+#---------------
+
+# combine
+bs <- left_join(bs, rpkms, by = "geneID" )
+
+```
+
+
+
+## Using strength groups previously defined in the manuscript
+
+The split between bot, mid and high is already used in the manuscript, so we could use this for the plots.
+
+```{r}
+
+# by bs strength groups
+mid_median <- bs %>%
+  subset(bsStrength == "mid") %>%
+  pull(AveRPKM) %>%
+  log10(.) %>%
+  median(na.rm = T)
+
+ggplot(bs, aes(x = bsStrength, y = log10(AveRPKM)))+
+  gghalves::geom_half_boxplot()+
+  ggrastr::rasterise(gghalves::geom_half_point(alpha = 0.2), dpi = 300)+
+  xlab("Binding site strength groups")+
+  ylab("Gene expression from RNAseq experiment [RPKM]")+
+  geom_hline(yintercept = mid_median, color = "darkred", size = 1)
+
+ggsave( paste0(out, "Binding_strength_vs_expression.pdf"), width = 8, height = 5)
+
+
+```
+
+
+# Expression vs CLIP signal
+
+```{r}
+# Overlap signal with genes
+genes <- anno[anno$type == "gene"]
+
+idx <- findOverlaps(genes, clip_signal)
+
+sig_per_gene <- data.frame(gene_id = genes[queryHits(idx)]$gene_id , 
+                           gene_length = width(genes[queryHits(idx)]),
+                           n_crosslinks = clip_signal[subjectHits(idx)]$score)
+
+sig_per_gene <- sig_per_gene %>% 
+  group_by(gene_id) %>%
+  summarise(n_crosslinks = sum(n_crosslinks)) 
+
+# add mean reads from RNAseq
+counts_mean <- data.frame( mean_counts = counts_matrix_norm %>% rowMeans(),
+                           gene_id = rownames(counts_matrix_norm))
+
+sig_per_gene <- left_join(sig_per_gene, counts_mean, by = "gene_id")
+
+
+# calculate clip rpkm
+# sig_per_gene$clip_rpkm <- rpkm(sig_per_gene$n_crosslinks, 
+#                                gene.length = sig_per_gene$gene_length)
+
+
+ggplot(sig_per_gene, aes(x = mean_counts, y = n_crosslinks))+
+  ggrastr::rasterise(ggpointdensity::geom_pointdensity())+
+  scale_x_log10() +
+  scale_y_log10() +
+  stat_cor()+
+  xlab("Reads on gene in RNA-seqeuncing data")+
+  ylab("Crosslinks on gene in iCLIP data")
+
+ggsave(paste(out, "Reads_vs_crosslinks.pdf"), width = 7, height = 5)
+
+
+```
+
+
+# Make supplementary table
+
+
+```{r}
+#---------------
+# Table with expression and binding sites per gene
+#---------------
+
+bs_gene <- bs %>% group_by(geneID) %>% 
+  summarise(., n_BindingSites = n())
+
+gene_table <- sig_per_gene %>% left_join(bs_gene, by = c(gene_id = "geneID")) %>%
+  arrange(desc(mean_counts)) %>%
+  left_join(rpkms, by = c(gene_id = "geneID"))
+
+xlsx::write.xlsx(gene_table, paste0(out, "Expression_top10_genes_and_binding_sites.xlsx"))
+
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+
+```
+
